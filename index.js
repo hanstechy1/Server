@@ -9,7 +9,6 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Health check endpoint kuzuia Render isilale
 app.get('/ping', (req, res) => res.send('OK'));
 
 app.post('/generate', async (req, res) => {
@@ -22,9 +21,8 @@ app.post('/generate', async (req, res) => {
     if (phone) phone = phone.replace(/[^0-9]/g, '');
     const sessionDir = path.join(__dirname, 'sessions', (phone || 'qr_' + Date.now()));
 
-    // Futa session zilizopita ikiwa zipo ili kuzuia kugoma
     if (fs.existsSync(sessionDir)) {
-        fs.rmSync(sessionDir, { recursive: true, force: true });
+        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
     }
 
     try {
@@ -32,32 +30,41 @@ app.post('/generate', async (req, res) => {
         
         const sock = makeWASocket({
             auth: state,
-            logger: pino({ level: 'fatal' }),
+            logger: pino({ level: 'silent' }),
             printQRInTerminal: false,
-            browser: Browsers.ubuntu('Chrome'),
-            connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 0,
-            keepAliveIntervalMs: 10000
+            browser: Browsers.macOS('Desktop'),
+            connectTimeoutMs: 15000,
         });
 
         sock.ev.on('creds.update', saveCreds);
 
-        // Kutoa Pair Code haraka
         if (method === 'pair') {
-            await delay(1500);
-            if (!sock.authState.creds.registered) {
+            // Tumia Promise.race kuweka timeout ya sekunde 12 isizunguke milele
+            const getCode = new Promise(async (resolve, reject) => {
                 try {
-                    const code = await sock.requestPairingCode(phone);
-                    return res.json({ code });
+                    await delay(2000);
+                    if (!sock.authState.creds.registered) {
+                        const code = await sock.requestPairingCode(phone);
+                        resolve(code);
+                    } else {
+                        reject("Number already registered!");
+                    }
                 } catch (err) {
-                    return res.status(500).json({ error: "Error generating Pair Code. Try again!" });
+                    reject(err);
                 }
-            } else {
-                return res.json({ message: "Number already registered!" });
+            });
+
+            const timeout = new Promise((_, reject) => 
+                setTimeout(() => reject("Connection timeout. WhatsApp is taking too long to respond. Try again!"), 12000)
+            );
+
+            try {
+                const code = await Promise.race([getCode, timeout]);
+                return res.json({ code });
+            } catch (err) {
+                return res.status(500).json({ error: typeof err === 'string' ? err : "Failed to generate Pair Code. Try again." });
             }
         } 
-        
-        // Kutoa QR Code
         else if (method === 'qr') {
             let hasResponded = false;
 
@@ -71,12 +78,12 @@ app.post('/generate', async (req, res) => {
 
             setTimeout(() => {
                 if (!hasResponded && !res.headersSent) {
-                    return res.status(508).json({ error: "QR Code timeout. Please try clicking again!" });
+                    return res.status(504).json({ error: "QR Code timeout. Please try again." });
                 }
-            }, 25000);
+            }, 10000);
         }
 
-        // Send Session ID to DM upon successful login
+        // Kutuma Session ID DM
         sock.ev.on('connection.update', async (update) => {
             const { connection } = update;
             if (connection === 'open') {
@@ -86,30 +93,22 @@ app.post('/generate', async (req, res) => {
                     if (fs.existsSync(credsPath)) {
                         const credsData = fs.readFileSync(credsPath, 'utf8');
                         const sessionId = Buffer.from(credsData).toString('base64');
-
                         const message = `✅ *Connected Successfully!*\n\nHere is your Session ID:\n\n\`\`\`Session_${sessionId}\`\`\`\n\n*Warning:* Do not share this ID with anyone!`;
-                        
                         await sock.sendMessage(sock.user.id, { text: message });
                     }
-                } catch (err) {
-                    console.error("Failed to send session ID:", err);
-                }
-
+                } catch (err) {}
                 setTimeout(() => {
-                    if (fs.existsSync(sessionDir)) {
-                        fs.rmSync(sessionDir, { recursive: true, force: true });
-                    }
+                    try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
                 }, 10000);
             }
         });
 
     } catch (error) {
-        console.error(error);
         if (!res.headersSent) {
-            res.status(500).json({ error: "Failed to process request." });
+            res.status(500).json({ error: "Server error occurred. Please try again." });
         }
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Fast Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
